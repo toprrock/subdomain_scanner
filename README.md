@@ -23,3 +23,6 @@ Hedef domainler için subdomain taraması yapan Python tabanlı bir araç.
 ```bash
 git clone https://github.com/toprrock/subdomain_scanner.git
 cd subdomain_scanner
+
+Tüm parametrelerle kullanım:
+bashCopypython subdomain_scanner.py --domain example.com --mod tam --thread 10 --
