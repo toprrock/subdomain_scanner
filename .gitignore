@@ -1,171 +1,139 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
+import json
+import argparse
+import asyncio
+import aiohttp
+import dns.resolver
+from datetime import datetime
+from typing import Dict, List
+import ssl
+import socket
 
-# C extensions
-*.so
+class SubdomainScanner:
+    def __init__(self, config: dict):
+        self.config = config
+        self.hedef_domain = config['hedef_domain']
+        self.thread_sayısı = config.get('thread_sayısı', 10)
+        self.zaman_aşımı = config.get('zaman_aşımı', 5)
+        self.başlangıç_zamanı = datetime.now()
 
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
+    async def tara(self) -> dict:
+        try:
+            subdomains = []
+            aktif_sayısı = 0
+            
+            # DNS taraması
+            if self.config['tarama_modu'] in ['tam', 'aktif']:
+                dns_sonuçları = await self.dns_tara()
+                subdomains.extend(dns_sonuçları)
+            
+            # Aktif subdomainleri kontrol et
+            for subdomain in subdomains:
+                if subdomain['durum']['aktif']:
+                    aktif_sayısı += 1
 
-# PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
-*.manifest
-*.spec
+            bitiş_zamanı = datetime.now()
+            tarama_süresi = (bitiş_zamanı - self.başlangıç_zamanı).total_seconds()
 
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
+            return {
+                "sonuç": {
+                    "durum": "başarılı",
+                    "veri": {
+                        "hedef_domain": self.hedef_domain,
+                        "tarama_tarihi": self.başlangıç_zamanı.isoformat(),
+                        "bulunan_subdomainler": subdomains,
+                        "istatistikler": {
+                            "toplam_bulunan": len(subdomains),
+                            "aktif_olanlar": aktif_sayısı,
+                            "tarama_süresi": tarama_süresi
+                        }
+                    },
+                    "hata_mesajı": None
+                }
+            }
+        except Exception as e:
+            return {
+                "sonuç": {
+                    "durum": "başarısız",
+                    "veri": {},
+                    "hata_mesajı": str(e)
+                }
+            }
 
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
-.pytest_cache/
-cover/
+    async def dns_tara(self) -> List[Dict]:
+        subdomains = []
+        wordlist = ["www", "mail", "ftp", "admin", "blog", "dev", "test"]
+        
+        for word in wordlist:
+            subdomain = f"{word}.{self.hedef_domain}"
+            try:
+                answers = dns.resolver.resolve(subdomain, 'A')
+                ip_adresleri = [str(answer) for answer in answers]
+                
+                # HTTP kontrolü
+                is_active = await self.http_kontrol(subdomain)
+                
+                subdomains.append({
+                    "subdomain": subdomain,
+                    "ip_adresleri": ip_adresleri,
+                    "durum": {
+                        "aktif": is_active,
+                        "http_durumu": 200 if is_active else 0
+                    },
+                    "bulunma_kaynağı": "DNS",
+                    "ssl_bilgisi": await self.ssl_kontrol(subdomain)
+                })
+            except:
+                continue
+                
+        return subdomains
 
-# Translations
-*.mo
-*.pot
+    async def http_kontrol(self, subdomain: str) -> bool:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"http://{subdomain}", timeout=self.zaman_aşımı) as response:
+                    return response.status == 200
+        except:
+            return False
 
-# Django stuff:
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
+    async def ssl_kontrol(self, subdomain: str) -> Dict:
+        try:
+            context = ssl.create_default_context()
+            with socket.create_connection((subdomain, 443), timeout=self.zaman_aşımı) as sock:
+                with context.wrap_socket(sock, server_hostname=subdomain) as ssock:
+                    cert = ssock.getpeercert()
+                    return {
+                        "var_mı": True,
+                        "geçerlilik_tarihi": cert['notAfter']
+                    }
+        except:
+            return {
+                "var_mı": False,
+                "geçerlilik_tarihi": None
+            }
 
-# Flask stuff:
-instance/
-.webassets-cache
+def main():
+    # Komut satırı argümanlarını ayarla
+    parser = argparse.ArgumentParser(description='Subdomain Keşif Aracı')
+    parser.add_argument('--domain', required=True, help='Hedef domain')
+    parser.add_argument('--mod', default='tam', choices=['pasif', 'aktif', 'tam'], help='Tarama modu')
+    parser.add_argument('--thread', type=int, default=10, help='Thread sayısı')
+    parser.add_argument('--timeout', type=int, default=5, help='Zaman aşımı süresi')
+    args = parser.parse_args()
 
-# Scrapy stuff:
-.scrapy
+    # Konfigürasyon oluştur
+    config = {
+        "hedef_domain": args.domain,
+        "tarama_modu": args.mod,
+        "thread_sayısı": args.thread,
+        "zaman_aşımı": args.timeout
+    }
 
-# Sphinx documentation
-docs/_build/
+    # Tarayıcıyı başlat
+    scanner = SubdomainScanner(config)
+    sonuç = asyncio.run(scanner.tara())
+    
+    # Sonuçları yazdır
+    print(json.dumps(sonuç, indent=2, ensure_ascii=False))
 
-# PyBuilder
-.pybuilder/
-target/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# IPython
-profile_default/
-ipython_config.py
-
-# pyenv
-#   For a library or package, you might want to ignore these files since the code is
-#   intended to run in multiple environments; otherwise, check them in:
-# .python-version
-
-# pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
-#   install all needed dependencies.
-#Pipfile.lock
-
-# UV
-#   Similar to Pipfile.lock, it is generally recommended to include uv.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#uv.lock
-
-# poetry
-#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
-#poetry.lock
-
-# pdm
-#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
-#pdm.lock
-#   pdm stores project-wide configurations in .pdm.toml, but it is recommended to not include it
-#   in version control.
-#   https://pdm.fming.dev/latest/usage/project/#working-with-version-control
-.pdm.toml
-.pdm-python
-.pdm-build/
-
-# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
-__pypackages__/
-
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
-
-# SageMath parsed files
-*.sage.py
-
-# Environments
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
-# Spyder project settings
-.spyderproject
-.spyproject
-
-# Rope project settings
-.ropeproject
-
-# mkdocs documentation
-/site
-
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
-# Pyre type checker
-.pyre/
-
-# pytype static type analyzer
-.pytype/
-
-# Cython debug symbols
-cython_debug/
-
-# PyCharm
-#  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
-#  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
-#  and can be added to the global gitignore or merged into this file.  For a more nuclear
-#  option (not recommended) you can uncomment the following to ignore the entire idea folder.
-#.idea/
-
-# PyPI configuration file
-.pypirc
+if __name__ == "__main__":
+    main()
